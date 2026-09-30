@@ -34,6 +34,7 @@ body{padding:10px}
   backdrop-filter:blur(10px);border:1px solid #ccd6e0;border-radius:14px;padding:8px;
   display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px;
 }
+input,textarea{font-family:inherit}
 button{border:1px solid #b7c4d2;background:white;border-radius:10px;padding:9px 12px;font-size:15px;touch-action:manipulation;-webkit-user-select:none;user-select:none}
 button.primary{background:var(--navy);color:white}
 .colorDot{width:30px;height:30px;border-radius:50%;padding:0}
@@ -317,9 +318,203 @@ document.getElementById('clearBtn').addEventListener('click', e => {
   setMarkMode(false);
 });
 
+// ---- On-device PDF (used on iPad/iPhone) ---------------------------------
+// iPad Safari ignores the page's print margins and always stamps its own
+// URL / page-number header and footer, with no option to turn them off. So
+// on Apple touch devices the chart is drawn to an image here, wrapped in a
+// one-page Letter PDF, and handed to the share sheet (Print, Save to Files,
+// ...). Everything happens in memory on the device; nothing is sent anywhere.
+
+const RENDER_SCALE = 2; // canvas pixels per artwork pixel
+
+function sheetToCanvas() {
+  const sheet = document.getElementById('sheet');
+  const box = sheet.getBoundingClientRect();
+  const k = 1024 / box.width; // screen px -> artwork px
+  const canvas = document.createElement('canvas');
+  canvas.width = 1024 * RENDER_SCALE;
+  canvas.height = 1536 * RENDER_SCALE;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(RENDER_SCALE, RENDER_SCALE);
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, 1024, 1536);
+  ctx.drawImage(sheet.querySelector('.bg'), 0, 0, 1024, 1536);
+
+  const rel = r => ({ x: (r.left - box.left) * k, y: (r.top - box.top) * k, w: r.width * k, h: r.height * k });
+  const px = v => (parseFloat(v) || 0) * k;
+  const visible = c => c && c !== 'transparent' && !/rgba\(.*,\s*0\)$/.test(c);
+  const setFont = cs => {
+    ctx.font = cs.fontStyle + ' ' + cs.fontWeight + ' ' + px(cs.fontSize) + 'px ' + cs.fontFamily;
+    ctx.fillStyle = cs.color;
+    ctx.textBaseline = 'middle';
+  };
+
+  function drawBoxAndBorders(cs, r) {
+    if (visible(cs.backgroundColor)) {
+      ctx.fillStyle = cs.backgroundColor;
+      ctx.fillRect(r.x, r.y, r.w, r.h);
+    }
+    [['Top', r.x, r.y, r.x + r.w, r.y], ['Bottom', r.x, r.y + r.h, r.x + r.w, r.y + r.h],
+     ['Left', r.x, r.y, r.x, r.y + r.h], ['Right', r.x + r.w, r.y, r.x + r.w, r.y + r.h]].forEach(([side, x1, y1, x2, y2]) => {
+      const w = px(cs['border' + side + 'Width']);
+      if (!w || cs['border' + side + 'Style'] === 'none' || !visible(cs['border' + side + 'Color'])) return;
+      const inset = w / 2 * (side === 'Top' || side === 'Left' ? 1 : -1);
+      ctx.strokeStyle = cs['border' + side + 'Color'];
+      ctx.lineWidth = w;
+      ctx.beginPath();
+      if (side === 'Top' || side === 'Bottom') { ctx.moveTo(x1, y1 + inset); ctx.lineTo(x2, y2 + inset); }
+      else { ctx.moveTo(x1 + inset, y1); ctx.lineTo(x2 + inset, y2); }
+      ctx.stroke();
+    });
+  }
+
+  function drawCheckbox(el, r) {
+    const s = Math.min(r.w, r.h), x = r.x + (r.w - s) / 2, y = r.y + (r.h - s) / 2, rad = s * 0.18;
+    ctx.beginPath();
+    ctx.moveTo(x + rad, y); ctx.arcTo(x + s, y, x + s, y + s, rad); ctx.arcTo(x + s, y + s, x, y + s, rad);
+    ctx.arcTo(x, y + s, x, y, rad); ctx.arcTo(x, y, x + s, y, rad); ctx.closePath();
+    if (el.checked) {
+      ctx.fillStyle = '#0f3f79'; ctx.fill();
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = s * 0.14; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      ctx.beginPath(); ctx.moveTo(x + s * 0.24, y + s * 0.52); ctx.lineTo(x + s * 0.43, y + s * 0.71); ctx.lineTo(x + s * 0.77, y + s * 0.3); ctx.stroke();
+      ctx.lineCap = 'butt';
+    } else {
+      ctx.fillStyle = '#fff'; ctx.fill();
+      ctx.strokeStyle = '#7c8792'; ctx.lineWidth = 1.5; ctx.stroke();
+    }
+  }
+
+  function contentBox(cs, r) {
+    const l = px(cs.paddingLeft) + px(cs.borderLeftWidth), t = px(cs.paddingTop) + px(cs.borderTopWidth);
+    return { x: r.x + l, y: r.y + t, w: r.w - l - px(cs.paddingRight) - px(cs.borderRightWidth), h: r.h - t - px(cs.paddingBottom) - px(cs.borderBottomWidth) };
+  }
+
+  function drawInputText(el, cs, r) {
+    let v = el.value;
+    if (!v) return;
+    { const m = v.match(/^(\d{4})-(\d{2})-(\d{2})$/); if (m) v = m[2] + '/' + m[3] + '/' + m[1]; }
+    const c = contentBox(cs, r);
+    setFont(cs);
+    ctx.save(); ctx.beginPath(); ctx.rect(c.x, r.y, c.w, r.h); ctx.clip();
+    ctx.fillText(v, c.x, c.y + c.h / 2);
+    ctx.restore();
+  }
+
+  function drawTextarea(el, cs, r) {
+    if (!el.value) return;
+    const c = contentBox(cs, r), lh = px(cs.lineHeight);
+    setFont(cs);
+    const lines = [];
+    el.value.split('\n').forEach(para => {
+      let line = '';
+      para.split(/(\s+)/).forEach(word => {
+        const test = line + word;
+        if (line && ctx.measureText(test.trimEnd()).width > c.w) { lines.push(line.trimEnd()); line = word.trimStart(); }
+        else line = test;
+      });
+      lines.push(line.trimEnd());
+    });
+    ctx.save(); ctx.beginPath(); ctx.rect(c.x, c.y, c.w, c.h); ctx.clip();
+    lines.forEach((line, i) => ctx.fillText(line, c.x, c.y + lh * i + lh / 2));
+    ctx.restore();
+  }
+
+  function drawTextNode(node) {
+    setFont(getComputedStyle(node.parentElement));
+    const range = document.createRange();
+    const re = /\S+/g; let m;
+    while ((m = re.exec(node.data))) {
+      range.setStart(node, m.index); range.setEnd(node, m.index + m[0].length);
+      const rr = range.getClientRects()[0];
+      if (!rr) continue;
+      const r = rel(rr);
+      ctx.fillText(m[0], r.x, r.y + r.h / 2);
+    }
+  }
+
+  (function walk(el) {
+    for (const node of el.childNodes) {
+      if (node.nodeType === 3) { if (node.data.trim()) drawTextNode(node); continue; }
+      if (node.nodeType !== 1 || node.classList.contains('bg')) continue;
+      const cs = getComputedStyle(node);
+      if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+      const r = rel(node.getBoundingClientRect());
+      if (node.type === 'checkbox') { drawCheckbox(node, r); continue; }
+      if (cs.borderTopLeftRadius === '50%') { // placed marker
+        const w = px(cs.borderTopWidth);
+        ctx.strokeStyle = cs.borderTopColor; ctx.lineWidth = w;
+        ctx.beginPath(); ctx.arc(r.x + r.w / 2, r.y + r.h / 2, r.w / 2 - w / 2, 0, Math.PI * 2); ctx.stroke();
+        continue;
+      }
+      drawBoxAndBorders(cs, r);
+      if (node.tagName === 'INPUT') { drawInputText(node, cs, r); continue; }
+      if (node.tagName === 'TEXTAREA') { drawTextarea(node, cs, r); continue; }
+      walk(node);
+    }
+  })(sheet);
+  return canvas;
+}
+
+function jpegPdf(jpegBytes, imgW, imgH) {
+  // One US Letter page (612 x 792 pt) holding the chart image, centred with
+  // a 0.2in top/bottom margin.
+  const pageW = 612, pageH = 792, margin = 14.4;
+  const h = pageH - 2 * margin, w = h * imgW / imgH, x = (pageW - w) / 2;
+  const enc = new TextEncoder(), parts = [], offsets = [];
+  let length = 0;
+  const add = p => { const b = typeof p === 'string' ? enc.encode(p) : p; parts.push(b); length += b.length; };
+  const obj = (n, body) => { offsets[n] = length; add(n + ' 0 obj\n'); body(); add('\nendobj\n'); };
+  const content = 'q ' + w.toFixed(2) + ' 0 0 ' + h.toFixed(2) + ' ' + x.toFixed(2) + ' ' + margin.toFixed(2) + ' cm /Im0 Do Q';
+  add('%PDF-1.4\n');
+  obj(1, () => add('<< /Type /Catalog /Pages 2 0 R >>'));
+  obj(2, () => add('<< /Type /Pages /Kids [3 0 R] /Count 1 >>'));
+  obj(3, () => add('<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ' + pageW + ' ' + pageH + '] /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>'));
+  obj(4, () => { add('<< /Type /XObject /Subtype /Image /Width ' + imgW + ' /Height ' + imgH + ' /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ' + jpegBytes.length + ' >>\nstream\n'); add(jpegBytes); add('\nendstream'); });
+  obj(5, () => add('<< /Length ' + content.length + ' >>\nstream\n' + content + '\nendstream'));
+  const xref = length;
+  let table = 'xref\n0 6\n0000000000 65535 f \n';
+  for (let n = 1; n <= 5; n++) table += String(offsets[n]).padStart(10, '0') + ' 00000 n \n';
+  add(table + 'trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n' + xref + '\n%%EOF\n');
+  return new Blob(parts, { type: 'application/pdf' });
+}
+
+function buildChartPdf() {
+  const canvas = sheetToCanvas();
+  const bin = atob(canvas.toDataURL('image/jpeg', 0.92).split(',')[1]);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return jpegPdf(bytes, canvas.width, canvas.height);
+}
+
+function pdfFileName() {
+  const dos = document.getElementById('dos2').value || new Date().toISOString().slice(0, 10);
+  return 'Sclero Chart ' + dos + '.pdf';
+}
+
+// Fallback if the share sheet is unavailable: a tap-to-open link (a fresh
+// tap is needed because the original tap has been used up by then).
+function offerPdfLink(blob) {
+  const url = URL.createObjectURL(blob);
+  const wrap = document.createElement('div');
+  wrap.style.cssText = 'position:fixed;inset:0;z-index:100;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center';
+  wrap.innerHTML = '<div style="background:#fff;border-radius:14px;padding:22px;text-align:center;font-size:17px;max-width:320px">PDF is ready.<br><br><a target="_blank" style="display:inline-block;background:#0f3f79;color:#fff;border-radius:10px;padding:10px 18px;text-decoration:none">Open PDF</a> <button style="margin-left:8px">Close</button></div>';
+  wrap.querySelector('a').href = url;
+  wrap.querySelector('button').onclick = () => { wrap.remove(); URL.revokeObjectURL(url); };
+  document.body.appendChild(wrap);
+}
+
+const isAppleTouch = /iPad|iPhone|iPod|Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1;
+
 document.getElementById('pdfBtn').addEventListener('click', e => {
   e.preventDefault();
-  window.print();
+  if (!isAppleTouch) { window.print(); return; }
+  const blob = buildChartPdf();
+  const file = new File([blob], pdfFileName(), { type: 'application/pdf' });
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    navigator.share({ files: [file] }).catch(err => { if (err.name !== 'AbortError') offerPdfLink(blob); });
+  } else {
+    offerPdfLink(blob);
+  }
 });
 
 document.querySelectorAll('.ruled').forEach(box => {
