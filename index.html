@@ -61,9 +61,13 @@ button.primary{background:var(--navy);color:white}
 .checkbox:checked::after{content:"✓";display:block;text-align:center;line-height:23px;font-weight:700;font-size:21px;color:#0b6bd3}
 .sig{position:absolute;right:18px;top:18px;width:245px;height:88px}
 .smallnote{font-size:12px;color:#64748b}
+/* Zero page margin: browsers draw their URL / page-number header and
+   footer inside the margin, so with none there is nowhere to print them
+   (iPad Safari has no switch to turn them off). The white border around
+   the chart comes from #app's padding below instead. */
 @page {
   size: Letter portrait;
-  margin: 0.25in;
+  margin: 0;
 }
 @media print {
   * {
@@ -81,14 +85,16 @@ button.primary{background:var(--navy);color:white}
   #app {
     max-width: none !important;
     margin: 0 !important;
+    padding-top: 1.6% !important;
     box-shadow: none !important;
     border-radius: 0 !important;
   }
-  /* Sized as a share of the page width, not in inches: at 80% of the
-     width the sheet is 1.2x the width tall, which fits a Letter or A4 page
-     at any margin setting, so it always prints on exactly one page. */
+  /* Sized as a share of the page width, not in inches, because iPad Safari
+     maps inches to paper differently. At 84% of the width the sheet is
+     1.26x the page width tall (Letter is 1.29x), so it fills the page and
+     still prints on exactly one page. */
   #sheetWrap {
-    width: 80% !important;
+    width: 84% !important;
     margin: 0 auto !important;
     break-inside: avoid;
   }
